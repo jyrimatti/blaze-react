@@ -55,4 +55,4 @@ library
     , unordered-containers
     , vector
     , void
-
+    , ghcjs-base
