@@ -18,7 +18,12 @@ import           Data.Maybe            (fromMaybe)
 import           Data.Monoid           ((<>))
 import qualified Data.Text             as T
 
-import           GHCJS.Types           (JSRef, JSString, JSObject, JSFun)
+import           GHCJS.Types           (JSVal,JSRef,JSString)
+import qualified Data.JSString         as JSString
+import           JavaScript.Object
+import           JavaScript.Cast       (unsafeCast)
+import           GHCJS.Foreign.Callback
+import           GHCJS.Prim
 import qualified GHCJS.Foreign         as Foreign
 
 import           Prelude hiding (div)
@@ -47,7 +52,7 @@ foreign import javascript unsafe
     "h$reactjs.mountApp($1, $2)"
     mountReactApp
         :: JSRef DOMNode_                          -- ^ Browser DOM node
-        -> JSFun (JSObject ReactJS.ReactJSNode -> IO ())
+        -> Callback (JSVal -> IO ())
            -- ^ render callback that stores the created nodes in the 'node'
            -- property of the given object.
         -> IO (JSRef ReactJSApp_)
@@ -59,7 +64,7 @@ foreign import javascript unsafe
 foreign import javascript unsafe
     "h$reactjs.attachRouteWatcher($1)"
     attachPathWatcher
-        :: JSFun (JSString -> IO ())
+        :: Callback (JSVal -> IO ())
            -- ^ Callback that handles a route change.
         -> IO ()
 
@@ -72,7 +77,7 @@ foreign import javascript unsafe
 
 foreign import javascript unsafe
     "window.requestAnimationFrame($1)"
-    requestAnimationFrame :: JSFun (IO ()) -> IO ()
+    requestAnimationFrame :: Callback (IO ()) -> IO ()
 
 foreign import javascript unsafe
     "document.createElement(\"div\")"
@@ -90,9 +95,7 @@ foreign import javascript unsafe
 atAnimationFrame :: IO () -> IO ()
 atAnimationFrame io = do
     cb <- fixIO $ \cb ->
-        Foreign.syncCallback Foreign.AlwaysRetain
-                             False
-                             (Foreign.release cb >> io)
+        asyncCallback (releaseCallback cb >> io)
     requestAnimationFrame cb
 
 runApp' :: (Show act) => App st act -> IO ()
@@ -111,7 +114,7 @@ runApp (App initialState initialRequests apply renderAppState) = do
 
     -- This is a cache of the URL fragment (hash) to prevent unnecessary
     -- updates.
-    urlFragmentVar <- newIORef =<< Foreign.fromJSString <$> getLocationFragment
+    urlFragmentVar <- newIORef =<< JSString.unpack <$> getLocationFragment
 
     -- rerendering
     let syncRedraw = join $ fromMaybe (return ()) <$> readIORef rerenderVar
@@ -129,7 +132,7 @@ runApp (App initialState initialRequests apply renderAppState) = do
           currentPath <- readIORef urlFragmentVar
           unless (newPath == currentPath) $ do
             writeIORef urlFragmentVar newPath
-            setRoute $ Foreign.toJSString $ "#" <> newPath
+            setRoute $ JSString.pack $ "#" <> newPath
 
     -- create render callback for initialState
     let handleAction action requireSyncRedraw = do
@@ -144,28 +147,28 @@ runApp (App initialState initialRequests apply renderAppState) = do
             handleAction action False
 
 
-        mkRenderCb :: IO (JSFun (JSObject ReactJS.ReactJSNode -> IO ()))
+        mkRenderCb :: IO (Callback (JSVal -> IO ()))
         mkRenderCb = do
-            Foreign.syncCallback1 Foreign.AlwaysRetain False $ \objRef -> do
+            asyncCallback1 $ \objRef -> do
                 state <- readIORef stateVar
                 let (WindowState body path) = renderAppState state
-                updatePath path
+                updatePath (T.unpack path)
                 node <- ReactJS.renderHtml handleAction body
-                Foreign.setProp ("node" :: JSString) node objRef
+                undefined --setProp ("node" :: JSString) node objRef
 
-    onPathChange <- Foreign.syncCallback1 Foreign.AlwaysRetain False $
+    onPathChange <- asyncCallback1 $
       \pathStr -> do
         currentPath <- readIORef urlFragmentVar
-        let newPath = T.drop 1 $ Foreign.fromJSString pathStr
+        let newPath = drop 1 $ fromJSString pathStr
         -- FIXME (asayers): if the route is the same, it seems to trigger a
         -- full-page reload
         unless (newPath == currentPath) $ do
           writeIORef urlFragmentVar newPath
-          handleAction (PathChangedTo newPath) True
+          handleAction (PathChangedTo $ T.pack newPath) True
     attachPathWatcher onPathChange
 
     -- mount and redraw app
-    bracket mkRenderCb Foreign.release $ \renderCb -> do
+    bracket mkRenderCb releaseCallback $ \renderCb -> do
         app <- mountReactApp root renderCb
         -- manually tie the knot between the event handlers
         writeIORef rerenderVar (Just (syncRedrawApp app))
