@@ -18,3 +18,4 @@ cabal.sandbox.config
 /reactjs-bindings/lib.js
 tags
 .DS_Store
+libs/hs/blaze-react-core/dist
